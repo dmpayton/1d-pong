@@ -18,7 +18,7 @@ class Pinout(object):
 
 
 class Color:
-    b = 1
+    b = 32
 
     BLACK = (0, 0, 0)
     WHITE = (b, b, b)
