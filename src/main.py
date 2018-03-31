@@ -1,7 +1,11 @@
+import gc
 import machine
-import nodepixel
+import neopixel
 import time
 
+import random
+
+gc.collect()
 
 class Pinout(object):
     D0 = 16
@@ -33,32 +37,32 @@ class Color:
 
     ORANGE = (b, int(b/2), 0)
 
+    @classmethod
+    def random(cls):
+        return random.choice((cls.RED, cls.GREEN, cls.BLUE, cls.YELLOW, cls.PURPLE, cls.CYAN, cls.ORANGE))
+
+
+class NeoPixel(neopixel.NeoPixel):
+    def clear(self):
+        for x in range(self.n):
+            self[x] = (0, 0, 0)
+
 
 class Player(object):
-    colors = (
-        Color.PURPLE,
-        Color.BLUE,
-        Color.CYAN,
-        Color.GREEN,
-        Color.YELLOW,
-        Color.ORANGE,
-        Color.RED,
-        Color.WHITE,
-    )
+    colors = (Color.PURPLE, Color.BLUE, Color.CYAN, Color.GREEN, Color.YELLOW, Color.ORANGE, Color.RED, Color.WHITE)
 
     max_score = 8
 
     def __init__(self, score_pin, paddle_pin, zone, game):
         self.zone = zone
         self.game = game
-        self.np = nodepixel.NeoPixel(score_pin, self.max_score)
+        self.np = NeoPixel(score_pin, self.max_score)
         self.paddle = paddle_pin
+        # self.paddle.irq(trigger=machine.Pin.IRQ_FALLING, handler=self.handle_paddle)
 
         self.score = 0
 
     def set_score(self, score):
-        if score > self.max_score:
-            return
         self._score = score
         self.game.render_queue.add(self)
 
@@ -87,6 +91,7 @@ class Ball(object):
         self.heading = self.HEADING_RIGHT
         self.moving = False
         self.game.render_queue.add(self)
+        self.color = Color.WHITE
 
     def set_position(self, position):
         self._position = position
@@ -102,11 +107,97 @@ class Ball(object):
             return
         self.position = min(max(self.position + self.heading, 0), self.game.np.n - 1)
 
+    def colorize(self):
+        self.color = Color.random()
+        if self.color == Color.BLACK:
+            self.colorize()
+
     def render(self):
         if self.moving:
             previous = min(max(self.position - self.heading, 0), self.game.np.n - 1)
             self.game.np[previous] = Color.BLACK
-        self.game.np[self.position] = Color.WHITE
+        self.game.np[self.position] = self.color
+        self.game.np.write()
+
+
+class GameState(object):
+    def __init__(self, game):
+        self.game = game
+        gc.collect()
+
+    def tick(self):
+        pass
+
+
+class StateWaiting(GameState):
+    def __init__(self, game):
+        super().__init__(game)
+        self.game.ball.moving = False
+
+
+    def tick(self):
+        if self.game.current_player.active():
+            self.game.ball.moving = True
+            self.game.state = StatePlaying(self.game)
+
+class StatePlaying(GameState):
+    def tick(self):
+        game = self.game
+        ball = game.ball
+        if ball.position in game.player1.zone:
+            if game.player1.active():
+                ball.heading = game.ball.HEADING_RIGHT
+                # ball.colorize()
+            elif ball.position == 0:
+                game.player2.score += 1
+                if game.player2.score == Player.max_score:
+                    game.state = StateGameOver(game)
+                else:
+                    ball.position = game.np.n - 1
+                    game.current_player = game.player2
+                    game.state = StateWaiting(game)
+                game.np.clear()
+
+        elif ball.position in game.player2.zone:
+            if game.player2.active():
+                ball.heading = game.ball.HEADING_LEFT
+                # ball.colorize()
+            elif ball.position == game.np.n - 1:
+                game.player1.score += 1
+                if game.player1.score == Player.max_score:
+                    game.state = StateGameOver(game)
+                else:
+                    ball.position = 0
+                    game.current_player = game.player1
+                    game.state = StateWaiting(game)
+                game.np.clear()
+
+        if ball.moving:
+            ball.move()
+
+
+class StateGameOver(GameState):
+    def __init__(self, game):
+        super().__init__(game)
+        self.counter = 0
+        if game.player1.score == Player.max_score:
+            self.winner = game.player1
+            self.loser = game.player2
+        else:
+            self.winner = game.player2
+            self.loser = game.player1
+
+        self.loser.score = 0
+
+    def tick(self):
+        self.counter += 1
+        if self.counter == 5:
+            self.winner.score = 0 if self.winner.score else Player.max_score
+            self.counter = 0
+        self.game.render_queue.add(self)
+
+    def render(self):
+        self.game.np[random.randint(0, self.game.np.n - 1)] = random.choice((Color.random(), Color.BLACK))
         self.game.np.write()
 
 
@@ -114,7 +205,7 @@ class Pong(object):
     endzone = 2
 
     def __init__(self):
-        self.np = nodepixel.NeoPixel(machine.Pin(Pinout.D4), 144)
+        self.np = NeoPixel(machine.Pin(Pinout.D4), 144)
         self.render_queue = set()
 
         self.player1 = Player(
@@ -133,73 +224,17 @@ class Pong(object):
 
         self.ball = Ball(self)
         self.current_player = self.player1
-        self.state = self.state_waiting
-
-    def state_waiting(self):
-        if self.current_player.active():
-            self.ball.moving = True
-            self.state = self.state_playing
-
-    def state_playing(self):
-        if self.ball.position in self.player1.zone:
-            if self.player1.active():
-                self.ball.heading = self.ball.HEADING_RIGHT
-            elif self.ball.position == 0:
-                self.player2.score += 1
-                self.ball.position = self.np.n - 1
-                self.ball.moving = False
-                self.current_player = self.player2
-                self.state = self.state_waiting
-                self.np.clear()
-
-        elif self.ball.position in self.player2.zone:
-            if self.player2.active():
-                self.ball.heading = self.ball.HEADING_LEFT
-            elif self.ball.position == self.np.n - 1:
-                self.player1.score += 1
-                self.ball.position = 0
-                self.ball.moving = False
-                self.current_player = self.player1
-                self.state = self.state_waiting
-                self.np.clear()
-
-        if self.ball.moving:
-            self.ball.move()
-
-
-        # if self.ball.position == 0 and not self.player1.active():
-        #     self.player2.score += 1
-        #     self.ball.position = self.np.n - 1
-        #     self.ball.moving = False
-        #     self.state = self.state_waiting
-        # elif self.ball.position == (self.np.n - 1) and not self.player2.active():
-        #     self.player1.score += 1
-        #     self.ball.position = 0
-        #     self.ball.moving = False
-        #     self.state = self.state_waiting
-        # else:
-        #     self.ball.move()
-        #     if self.ball.position in self.player1.zone and self.player1.active:
-        #         self.ball.heading = self.ball.HEADING_RIGHT
-        #     if self.ball.position in self.player2.zone and self.player2.active:
-        #         self.ball.heading = self.ball.HEADING_LEFT
-
-    def state_gameover(self):
-        pass
+        self.state = StateWaiting(self)
 
     def loop(self):
         while True:
-            self.state()
+            self.state.tick()
             self.render()
 
     def render(self):
         for obj in self.render_queue:
             obj.render()
         self.update_queue = set()
-        # self.np.clear()
-        # self.np[self.ball.position] = Color.WHITE
-        # self.np.write()
-
 
 if __name__ == '__main__':
     game = Pong()
